@@ -45,6 +45,25 @@ log()  { printf '%s[+]%s %s\n' "$GRN" "$RST" "$*"; }
 warn() { printf '%s[!]%s %s\n' "$YEL" "$RST" "$*" >&2; }
 die()  { printf '%s[x]%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
 
+# Nyitóképernyő. Kikapcsolás: NO_BANNER=1 ./lineage_prep.sh ...
+banner() {
+    [[ -t 1 && -z "${NO_BANNER:-}" ]] || return 0
+    local Y=$'\e[1;33m' C=$'\e[1;36m' G=$'\e[0;37m' B=$'\e[1m' R=$'\e[0m'
+    cat <<ART
+
+${G}      ┌┬┬┬┬┬┬┬┬┬┐
+${G}    ┌─┴┴┴┴┴┴┴┴┴┴┴─┐    ${C}█▀▀ █   ▄▀▄ █▀▀ █ █   █▄▀ █ ▀█▀
+${G}   ─┤      ${Y}▄█▀${G}    ├─   ${C}█▀  █   █▀█ ▀▀█ █▀█   █▀▄ █  █
+${G}   ─┤    ${Y}▄██▀${G}     ├─   ${C}▀   ▀▀▀ ▀ ▀ ▀▀▀ ▀ ▀   ▀ ▀ ▀  ▀
+${G}   ─┤   ${Y}▀▀▀██▀${G}    ├─
+${G}   ─┤     ${Y}▄█▀${G}     ├─   ${B}eMMC telepítő · Odroid C4 · Banana Pi M5${R}
+${G}   ─┤    ${Y}▀▀${G}       ├─   ${G}prep → burn → flash${R}
+${G}    └─┬┬┬┬┬┬┬┬┬┬┬─┘
+${G}      └┴┴┴┴┴┴┴┴┴┘${R}
+
+ART
+}
+
 # ==================================================================
 #  Interaktív segédfüggvények
 # ==================================================================
@@ -323,13 +342,20 @@ cmd_prep() {
         esac
     done
     [[ ${#positional[@]} -ge 1 ]] || die "Add meg, mit töltsön le (pl. odroidc4_tab, m5_tab, tab, tv, all). Súgó: --help"
-    dev=$(normalize_device "${positional[0]}")
-    case "$dev" in
-        tab) targets=(odroidc4_tab m5_tab) ;;
-        tv)  targets=(odroidc4 m5) ;;
-        all) targets=(odroidc4_tab m5_tab odroidc4 m5) ;;
-        *)   targets=("$dev") ;;
-    esac
+    for a in "${positional[@]}"; do
+        dev=$(normalize_device "$a")
+        case "$dev" in
+            tab) targets+=(odroidc4_tab m5_tab) ;;
+            tv)  targets+=(odroidc4 m5) ;;
+            all) targets+=(odroidc4_tab m5_tab odroidc4 m5) ;;
+            *)   targets+=("$dev") ;;
+        esac
+    done
+    # duplikátumok kiszűrése, sorrend megtartásával
+    local -A seen=(); local uniq=()
+    for dev in "${targets[@]}"; do [[ -n "${seen[$dev]:-}" ]] || { seen[$dev]=1; uniq+=("$dev"); }; done
+    targets=("${uniq[@]}")
+    log "Letöltendő: $(for dev in "${targets[@]}"; do printf '%s; ' "${DEVICE_DESC[$dev]}"; done)"
     preflight
     mkdir -p "$PROJECT_DIR"
     install_packages
@@ -737,10 +763,13 @@ LineageOS telepítő – Odroid C4 és Banana Pi M5 (Tablet / Android TV)
 Host: Ubuntu 24.04 LTS, x86_64, sudo joggal rendelkező (nem root) user
 
 HASZNÁLAT
-  ./${me} <parancs> [eszköz] [lépés] [kapcsolók]
+  ./${me}                                          # interaktív menü
+  ./${me} <parancs> [eszköz] [lépés] [kapcsolók]   # közvetlen futtatás
 
 PARANCSOK
-  prep  <eszköz|tab|tv|all> Csomagok telepítése, aml-flash-tool és update_verifier
+  (nincs parancs)           Interaktív menü – ez a legegyszerűbb.
+
+  prep  <eszköz|tab|tv|all>… Csomagok telepítése, aml-flash-tool és update_verifier
                             beállítása, a legfrissebb build letöltése SHA256 és
                             aláírás-ellenőrzéssel, valamint a hozzá illő
                             MindTheGapps letöltése (TV-hez full + minimal).
@@ -789,12 +818,138 @@ USAGE
 }
 
 # ==================================================================
+# ==================================================================
+#  Interaktív menü
+# ==================================================================
+# pick <cím> <opció1> <opció2> ...   ->  PICK = a választott sorszám (1..n)
+pick() {
+    local title="$1"; shift
+    local n=$# i ans
+    echo
+    echo "${CYN}${title}${RST}"
+    for (( i = 1; i <= n; i++ )); do printf '  %d) %s\n' "$i" "${!i}"; done
+    while true; do
+        read -rp "  Választás [1-${n}]: " ans
+        if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= n )); then
+            PICK="$ans"; return 0
+        fi
+        warn "Érvénytelen választás."
+    done
+}
+
+# menu_devices <több is választható: 0|1>  ->  MENU_DEVS tömb (codename-ek)
+menu_devices() {
+    local multi="$1" boards=() variants=() b v
+    if (( multi )); then
+        pick "Melyik eszköz?" "Odroid C4" "Banana Pi M5" "Mindkettő"
+    else
+        pick "Melyik eszköz?" "Odroid C4" "Banana Pi M5"
+    fi
+    case "$PICK" in 1) boards=(odroidc4) ;; 2) boards=(m5) ;; 3) boards=(odroidc4 m5) ;; esac
+
+    if (( multi )); then
+        pick "Melyik Android változat?" "Tablet" "Android TV" "Mindkettő"
+    else
+        pick "Melyik Android változat?" "Tablet" "Android TV"
+    fi
+    case "$PICK" in 1) variants=(_tab) ;; 2) variants=("") ;; 3) variants=(_tab "") ;; esac
+
+    MENU_DEVS=()
+    for b in "${boards[@]}"; do
+        for v in "${variants[@]}"; do MENU_DEVS+=("${b}${v}"); done
+    done
+}
+
+# A kiválasztott parancsot al-shellben futtatja, így egy hiba (die) nem lép ki
+# a menüből. A 'set -e' szándékosan az al-shellen belül kapcsol vissza.
+menu_run() {
+    local rc
+    set +e
+    ( set -e; "$@" )
+    rc=$?
+    set -e
+    echo
+    if (( rc == 0 )); then
+        log "A művelet befejeződött."
+    else
+        warn "A művelet megszakadt (kód: ${rc})."
+    fi
+    read -rp "   Enter: vissza a főmenübe... " _
+}
+
+menu_confirm() {
+    echo
+    echo "   ${YEL}Összegzés:${RST} $*"
+    ask_yes "   Indulhat?"
+}
+
+menu_prep() {
+    menu_devices 1
+    local args=("${MENU_DEVS[@]}") d desc=""
+    for d in "${MENU_DEVS[@]}"; do desc+="${DEVICE_DESC[$d]}; "; done
+    if ask_yes "MindTheGapps (Google Play) csomagot is letöltsem?"; then :; else args+=(--no-gapps); desc+="GApps nélkül"; fi
+    menu_confirm "Előkészítés – ${desc}" || return 0
+    menu_run cmd_prep "${args[@]}"
+}
+
+menu_burn() {
+    menu_devices 0
+    local dev="${MENU_DEVS[0]}" args=()
+    args=("$dev")
+    if [[ "$dev" == odroidc4* ]]; then
+        echo
+        echo "   Odroid C4: burn mode csak akkor jön létre, ha az eMMC-n nincs érvényes"
+        echo "   bootloader. Ha már van rajta rendszer (pl. korábbi LineageOS), rövidzár kell."
+        ask_yes "Rövidzáras (eMMC CMD/DAT0 → GND) burn mode-ot használsz?" && args+=(--short)
+    fi
+    menu_confirm "Burn – ${DEVICE_DESC[$dev]}$([[ " ${args[*]} " == *" --short "* ]] && echo ', rövidzárral')" || return 0
+    menu_run cmd_burn "${args[@]}"
+}
+
+menu_flash() {
+    menu_devices 0
+    local dev="${MENU_DEVS[0]}" step i
+    echo
+    echo "   Flash lépések:"
+    for i in "${!FLASH_NAMES[@]}"; do printf '     %d. %s\n' "$i" "${FLASH_NAMES[$i]}"; done
+    while true; do
+        read -rp "   Honnan induljon? (Enter = az elejétől, vagy a lépés száma): " step
+        step="${step:-0}"
+        [[ "$step" =~ ^[0-9]+$ ]] && (( step < ${#FLASH_NAMES[@]} )) && break
+        warn "Érvénytelen lépés."
+    done
+    menu_confirm "Flash – ${DEVICE_DESC[$dev]}, kezdés: ${step}. lépés (${FLASH_NAMES[$step]})" || return 0
+    menu_run cmd_flash "$dev" "$step"
+}
+
+interactive_menu() {
+    [[ -t 0 ]] || { usage; exit 1; }
+    while true; do
+        pick "Főmenü – mit szeretnél csinálni?" \
+            "Előkészítés (prep)  – csomagok, letöltés, ellenőrzés" \
+            "Burn                – bootloader + partíciók (aml-flash-tool)" \
+            "Flash               – LineageOS telepítése (recovery, sideload, GApps)" \
+            "Lépések listája" \
+            "Súgó" \
+            "Kilépés"
+        case "$PICK" in
+            1) menu_prep ;;
+            2) menu_burn ;;
+            3) menu_flash ;;
+            4) cmd_steps; read -rp "   Enter: vissza... " _ ;;
+            5) usage;     read -rp "   Enter: vissza... " _ ;;
+            6) log "Viszlát!"; exit 0 ;;
+        esac
+    done
+}
+
+banner
 case "${1:-}" in
     prep)             shift; cmd_prep "$@" ;;
     burn)             shift; cmd_burn "$@" ;;
     flash)            shift; cmd_flash "$@" ;;
     steps)            cmd_steps ;;
     help|-h|--help)   usage ;;
-    "")               usage; exit 1 ;;
+    ""|menu)          interactive_menu ;;
     *)                warn "Ismeretlen parancs: $(printf '%q' "$1")"; echo; usage; exit 1 ;;
 esac
